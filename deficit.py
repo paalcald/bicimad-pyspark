@@ -1,6 +1,5 @@
 import json
 from datetime import datetime
-from pprint import pprint
 from pyspark import SparkContext
 import functools
 import os
@@ -11,6 +10,7 @@ def pathInToOut(path, description):
     ofile_path_json = wd + "/data/" + file_name[:4] + "/" + file_name[4:]
     ofile_path_txt = ofile_path_json.replace(".json", ".txt").replace("movements", description)
     return (file_name[:4], ofile_path_txt)
+
 def getSTD(x):
     try:
         std = ((x['idunplug_station'],
@@ -21,10 +21,12 @@ def getSTD(x):
                 x['idplug_station']),
                 datetime.strptime(x['unplug_hourTime'],"%Y-%m-%dT%H:%M:%S.%f%z"))
     return std
+
 def getDeficit(rdd):
     deficit = rdd.mapValues(lambda xs: [x[1] for x in xs])\
                  .mapValues(lambda xs: functools.reduce(lambda x,y: x + y, xs))
     return sorted(deficit.collect())
+
 def rawToStd(sc, ifile, ofile):
     rdd_base = sc.textFile(ifile)
     bicis = rdd_base.map(lambda x: json.loads(x))
