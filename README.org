@@ -1,0 +1,179 @@
+#+TITLE: Deficit de Bicicletas por Estacion
+#+PROPERTY: header-args :tangle bin/deficit.py
+#+DESCRIPTION: Nuestro objetivo es ser capaz de monitorizar el déficit de bicicletas por estación del servicio Bicimad, esta información puede ser de gran importancia a la hora de mantener un stock constante de bicicletas en todas las diferentes estaciones. Calculando el tiempo y coste del transporte de las bicicletas, esta métrica nos sería tremendamente util para optimizar un servicio de transporte de bicicletas entre estaciones.
+#+AUTHOR: Pablo C. Alcalde
+* Índice de Contenido
+- [[Metodología]]
+- [[Formato de los Datos]]
+- [[Dependencias]]
+- [[Definiciones]]
+- [[Ejecutable]]
+
+* Metodología
+- Utilizaremos el conjunto de datos disponibles sobre la utilización del servicio Bicimad para obtener los viajes que se realizan, separados por franjas horarias para reflejar lo que se espera sea un distinto volumen de usuarios del servicio respetando las franjas de entrada y salida de trabajos así como las horas libres y los fines de semana.
+- Debido a la gran cantidad de datos a procesar utilizaremos la potencia de cómputo en paralelo ofrecida por Spark por medio de su API de python, pyspark.
+- Puesto que el programa está pensado para ejecutarse dentro de un cluster compartido cuya memoria se encuentra distribuida entre varios dispositivos tambien haremos uso del sistema Hadoop para archivar los datos iniciales.
+- Finalmente, ya que los datos una vez procesados tienen un tamaño reducido y que la legibilidad de estos no es una prioridad ó requisito, la salida de datos tendrá un formato sencillo.
+* Formato de los Datos
+** Descripcion del Formato
+El formato de los archivos ya procesados será el siguiente, separado por espacios, donde:
+*** Nº Estación
+La numeración de la estación según el servicio Bicimad.
+*** Hora
+La franja horaria correspondiente al cómputo del déficit, corresponde a las siguientes franjas:
+|--------+----------------+----------------------|
+| Código | Hora de Inicio | Hora de Finalización |
+|--------+----------------+----------------------|
+|      0 |          00:00 |                05:59 |
+|      1 |          06:00 |                08:59 |
+|      2 |          09:00 |                12:59 |
+|      3 |          13:00 |                14:59 |
+|      4 |          15:00 |                17:59 |
+|      5 |          18:00 |                21:00 |
+|      6 |          21:00 |                24:00 |
+|--------+----------------+----------------------|
+*** Deficit
+La diferencia entre el número de viajes finalizados en la estación de estudio respecto al número de viajes iniciados en la estación de estudio para el intervalo horario definido por Hora.
+** Ejemplo
+|-------------+------+---------|
+| Nº Estación | Hora | Déficit |
+|-------------+------+---------|
+|           1 |    0 |     120 |
+|         174 |    1 |     -20 |
+|-------------+------+---------|
+* Dependencias
+** Listado de Inclusiones
+*** json
+- loads()
+*** datetime
+- datetime.strptime()
+- weekday()
+- hour
+*** pyspark
+- SparkContext()
+- textFile()
+- _jvm.org.apache.hadoop
+- getPath()
+- conf.Configuration()
+- fs.Path()
+- get()
+- listStatus()
+*** functools
+- reduce()
+*** os
+- getcwd()
+- path.isdir()
+- mkdir()
+** Bloque de Inclusiones
+
+#+begin_src python
+import json
+from datetime import datetime
+from pyspark import SparkContext
+import functools
+import os
+#+end_src
+* Definiciones
+** Listado de Funciones
+*** [[pathInToOut()]]:
+Dado un string representando un archivo dentro del sistema de archivos Hadoop del cluster, devuelve un string representando el nombre de archivo correspondiente a los datos ya procesados junto con el año al que pertenecen.
+*** [[getSTD()]]:
+Dada la entrada correspondiente a un viaje de Bicimad, extrae la información de estudio en este programa, es decir, estación de inicio, estación de destino y hora de inicio del viaje. Tiene en cuenta que a partir de 2019 se codifica de diferente manera la hora en los datos de Bicimad.
+*** [[getDeficit()]]:
+Dada una rdd con pares (clave, valor) y siendo valor una lista de valores. Extrae el segundo valor de esta lista, para cada par y devuelve la suma de estos valores e.g. [('a', [1,2]), ('b',[3,4])] devuelve 6.
+*** [[rawToStd()]]:
+Dado un archivo de datos de Bicimad, un miembro de la clase SparkContext y el nombre de un archivo donde escribir los datos. El programa realiza el cálculo por cada estación y franja horaria de la diferencia entre el número de viajes iniciados en una estación menos el número de viajes finalizados en la misma. Lo escribe en el archivo de salida respetando el formato descrito en el apartado correspondiente.
+Para ello realiza los siquientes pasos:
+1) Vuelca el contenido del archivo de entrada en una RDD y cambiamos el formato de json a diccionario de python.
+2) Usando [[getSTD()]] filtramos la RDD por los datos de interes y quitamos los correspondientes a fines de semana.
+3) Filtramos los viajes por franjas horarias.
+4) Por franja horaria contamos el numero de viajes entre cada combinacion de estaciones de inicio y final ocurridas.
+5) Asociamos el numero de viajes de A hacia B, con la variación de bicicletas en A y en B e.g. ((A, B), 10) implica que A tiene ahora -10 bicicletas y B tiene +10.
+6) Formateamos los pares correctamente y les aplicamos la función [[getDeficit()]] para obtener la variación de bicicletas por estación.
+7) Escribimos en el archivo de salida los datos añadiendo el intervalo temporal al que pertenecen como se describe en el apartado [[Formato de los Datos]].
+** Bloque de Definiciones
+*** pathInToOut()
+#+begin_src python
+def pathInToOut(path, description):
+    file_name = path.split("/")[-1]
+    wd = os.getcwd()
+    ofile_path_json = wd + "/data/" + file_name[:4] + "/" + file_name[4:]
+    ofile_path_txt = ofile_path_json.replace(".json", ".txt").replace("movements", description)
+    return (file_name[:4], ofile_path_txt)
+#+end_src
+*** getSTD()
+#+begin_src python
+def getSTD(x):
+    try:
+        std = ((x['idunplug_station'],
+                x['idplug_station']),
+                datetime.strptime(x['unplug_hourTime']['$date'],"%Y-%m-%dT%H:%M:%S.%f%z"))
+    except:
+        std = ((x['idunplug_station'],
+                x['idplug_station']),
+                datetime.strptime(x['unplug_hourTime'],"%Y-%m-%dT%H:%M:%S.%f%z"))
+    return std
+#+end_src
+*** getDeficit()
+#+begin_src python
+def getDeficit(rdd):
+    deficit = rdd.mapValues(lambda xs: [x[1] for x in xs])\
+                 .mapValues(lambda xs: functools.reduce(lambda x,y: x + y, xs))
+    return sorted(deficit.collect())
+#+end_src
+*** rawToStd()
+#+begin_src python
+def rawToStd(sc, ifile, ofile):
+    rdd_base = sc.textFile(ifile)
+    bicis = rdd_base.map(lambda x: json.loads(x))
+    viajes = bicis.map(getSTD)\
+                  .filter(lambda x: x[0][0] != x[0][1] and x[1].weekday() < 6)
+    viajes_por_franja = []
+    horas = [0,6,9,13,15,18,21,24]
+    intervalos = zip(horas[:-1], horas[1:])
+    for i, period in enumerate(intervalos):
+        rdd = viajes.filter(lambda x: period[0] < x[1].hour and x[1].hour < period[1])\
+                    .groupByKey()\
+                    .mapValues(lambda x: len(x))\
+                    .flatMap(lambda x: [x, ((x[0][1], x[0][0]), -x[1])])\
+                    .map(lambda x: ((x[0][0],i), (x[0][1],x[1])))\
+                    .groupByKey()\
+                    .mapValues(list)
+        viajes_por_franja.append(rdd)
+    deficit_por_franja = list(map(getDeficit, viajes_por_franja))
+    to_print = [f"{dato[0]}\t{dato[1]}\t{deficit}"
+            for franja in deficit_por_franja
+            for dato, deficit in franja]
+    outfile = open(ofile, "w")
+    for line in to_print:
+        outfile.write(line + '\n')
+    outfile.close()
+#+end_src
+* Ejecutable
+** Descripcion
+El bloque principal del programa es donde ya una vez definida la función que nos devolverá los datos que queremos, nos adaptamos al formato de archivo y directorio en el cual está contenido dentro del cluster la información de bicimad y realizamos el proceso en cada archivo, devolviendolo formateado y respetando una estructura de directorios ordenada.
+** Bloque Principal
+#+begin_src python
+if __name__ == '__main__':
+    sc = SparkContext()
+    hadoop = sc._jvm.org.apache.hadoop
+    fs = hadoop.fs.FileSystem
+    conf = hadoop.conf.Configuration()
+    path = hadoop.fs.Path('/public_data/bicimad')
+    cwd = os.getcwd()
+    filenames = [str(f.getPath()) for f in fs.get(conf).listStatus(path)]
+    date_files = [(f, pathInToOut(f, "deficit")) for f in filenames if 'stations' not in f]
+    if not os.path.isdir("data"):
+        os.mkdir("data")
+        print("Created /data directory in wd")
+    for date_file in date_files:
+        ifile = date_file[0]
+        ofile = date_file[1][0]
+        year_dir = "data/" + date_file[1][0]
+        if not os.path.isdir(year_dir):
+            os.mkdir(year_dir)
+            print("Created ", year_dir, " for that year's data archive")
+        print("Working on ", ifile, " to store in ", date_file[1][1])
+        rawToStd(sc, ifile, ofile)
+        print("Done!")
+#+end_src
